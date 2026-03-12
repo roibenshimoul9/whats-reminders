@@ -198,12 +198,14 @@ function parseSingleReminder(text) {
   const now = new Date();
   let eventText = input;
 
+  // עוד שעה
   if (/עוד שעה/.test(input)) {
     const eventTime = new Date(now.getTime() + 60 * 60 * 1000);
     eventText = input.replace(/עוד שעה/g, "").trim() || "תזכורת";
     return { eventText, eventTime };
   }
 
+  // עוד X שעות
   const hoursLaterMatch = input.match(/עוד\s+(\d+)\s+שעות?/);
   if (hoursLaterMatch) {
     const hours = parseInt(hoursLaterMatch[1], 10);
@@ -212,6 +214,7 @@ function parseSingleReminder(text) {
     return { eventText, eventTime };
   }
 
+  // מחר HH:MM
   const tomorrowMatch = input.match(/^(.*)\s+מחר\s+(\d{1,2}):(\d{2})$/);
   if (tomorrowMatch) {
     eventText = tomorrowMatch[1].trim() || "תזכורת";
@@ -221,9 +224,31 @@ function parseSingleReminder(text) {
     const eventTime = new Date(now);
     eventTime.setDate(eventTime.getDate() + 1);
     eventTime.setHours(hour, minute, 0, 0);
+
     return { eventText, eventTime };
   }
 
+  // "בתאריך DD/MM בשעה HH:MM"
+  const explicitDateMatch = input.match(/^(.*)\s+בתאריך\s+(\d{1,2})\/(\d{1,2})\s+בשעה\s+(\d{1,2}):(\d{2})$/);
+  if (explicitDateMatch) {
+    eventText = explicitDateMatch[1].trim() || "תזכורת";
+    const day = parseInt(explicitDateMatch[2], 10);
+    const month = parseInt(explicitDateMatch[3], 10) - 1;
+    const hour = parseInt(explicitDateMatch[4], 10);
+    const minute = parseInt(explicitDateMatch[5], 10);
+
+    let year = now.getFullYear();
+    let eventTime = new Date(year, month, day, hour, minute, 0, 0);
+
+    if (eventTime <= now) {
+      year += 1;
+      eventTime = new Date(year, month, day, hour, minute, 0, 0);
+    }
+
+    return { eventText, eventTime };
+  }
+
+  // DD/MM HH:MM או D/M HH:MM
   const fullDateMatch = input.match(/^(.*)\s+(\d{1,2})\/(\d{1,2})\s+(\d{1,2}):(\d{2})$/);
   if (fullDateMatch) {
     eventText = fullDateMatch[1].trim() || "תזכורת";
@@ -243,6 +268,27 @@ function parseSingleReminder(text) {
     return { eventText, eventTime };
   }
 
+  // DD-MM HH:MM
+  const dashDateMatch = input.match(/^(.*)\s+(\d{1,2})-(\d{1,2})\s+(\d{1,2}):(\d{2})$/);
+  if (dashDateMatch) {
+    eventText = dashDateMatch[1].trim() || "תזכורת";
+    const day = parseInt(dashDateMatch[2], 10);
+    const month = parseInt(dashDateMatch[3], 10) - 1;
+    const hour = parseInt(dashDateMatch[4], 10);
+    const minute = parseInt(dashDateMatch[5], 10);
+
+    let year = now.getFullYear();
+    let eventTime = new Date(year, month, day, hour, minute, 0, 0);
+
+    if (eventTime <= now) {
+      year += 1;
+      eventTime = new Date(year + 1, month, day, hour, minute, 0, 0);
+    }
+
+    return { eventText, eventTime };
+  }
+
+  // היום HH:MM או טקסט + HH:MM
   const todayTimeMatch = input.match(/^(.*)\s+(\d{1,2}):(\d{2})$/);
   if (todayTimeMatch) {
     eventText = todayTimeMatch[1].trim() || "תזכורת";

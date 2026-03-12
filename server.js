@@ -1,6 +1,8 @@
 const express = require("express");
 const bodyParser = require("body-parser");
 const twilio = require("twilio");
+const fs = require("fs");
+const path = require("path");
 
 const app = express();
 app.use(bodyParser.urlencoded({ extended: false }));
@@ -11,6 +13,7 @@ const client = twilio(accountSid, authToken);
 
 const PORT = process.env.PORT || 3000;
 const FROM_NUMBER = "whatsapp:+14155238886";
+const FILE_PATH = path.join(__dirname, "reminders.json");
 
 function pad(num) {
   return String(num).padStart(2, "0");
@@ -24,20 +27,34 @@ function createTwimlMessage(message) {
   return `<?xml version="1.0" encoding="UTF-8"?><Response><Message>${message}</Message></Response>`;
 }
 
+function loadReminders() {
+  try {
+    if (!fs.existsSync(FILE_PATH)) {
+      fs.writeFileSync(FILE_PATH, "[]");
+    }
+    return JSON.parse(fs.readFileSync(FILE_PATH, "utf8"));
+  } catch (err) {
+    console.error("Failed to load reminders:", err.message);
+    return [];
+  }
+}
+
+function saveReminders(reminders) {
+  fs.writeFileSync(FILE_PATH, JSON.stringify(reminders, null, 2), "utf8");
+}
+
 function parseReminder(text) {
   const input = text.trim();
   const now = new Date();
 
   let eventText = input;
 
-  // עוד שעה
   if (/עוד שעה/.test(input)) {
     const eventTime = new Date(now.getTime() + 60 * 60 * 1000);
     eventText = input.replace(/עוד שעה/g, "").trim() || "תזכורת";
     return { eventText, eventTime };
   }
 
-  // עוד שעתיים / עוד X שעות
   const hoursLaterMatch = input.match(/עוד\s+(\d+)\s+שעות?/);
   if (hoursLaterMatch) {
     const hours = parseInt(hoursLaterMatch[1], 10);
@@ -46,7 +63,6 @@ function parseReminder(text) {
     return { eventText, eventTime };
   }
 
-  // מחר HH:MM
   const tomorrowMatch = input.match(/^(.*)\s+מחר\s+(\d{1,2}):(\d{2})$/);
   if (tomorrowMatch) {
     eventText = tomorrowMatch[1].trim() || "תזכורת";
@@ -60,7 +76,6 @@ function parseReminder(text) {
     return { eventText, eventTime };
   }
 
-  // DD/MM HH:MM או D/M HH:MM
   const fullDateMatch = input.match(/^(.*)\s+(\d{1,2})\/(\d{1,2})\s+(\d{1,2}):(\d{2})$/);
   if (fullDateMatch) {
     eventText = fullDateMatch[1].trim() || "תזכורת";
@@ -69,17 +84,17 @@ function parseReminder(text) {
     const hour = parseInt(fullDateMatch[4], 10);
     const minute = parseInt(fullDateMatch[5], 10);
 
-    const year = now.getFullYear();
+    let year = now.getFullYear();
     let eventTime = new Date(year, month, day, hour, minute, 0, 0);
 
     if (eventTime <= now) {
-      eventTime = new Date(year + 1, month, day, hour, minute, 0, 0);
+      year += 1;
+      eventTime = new Date(year, month, day, hour, minute, 0, 0);
     }
 
     return { eventText, eventTime };
   }
 
-  // היום HH:MM או סתם טקסט + HH:MM
   const todayTimeMatch = input.match(/^(.*)\s+(\d{1,2}):(\d{2})$/);
   if (todayTimeMatch) {
     eventText = todayTimeMatch[1].trim() || "תזכורת";
@@ -114,7 +129,7 @@ app.post("/whatsapp", async (req, res) => {
       res.set("Content-Type", "text/xml");
       return res.send(
         createTwimlMessage(
-          "לא הבנתי 😅\nשלח באחת מהצורות:\nדיון 14:00\nדיון מחר 10:30\nפגישה עוד שעה\nפגישה עוד 2 שעות\nטיפול רכב 12/4 09:00"
+          "לא הבנתי 😅\nשלח למשל:\nדיון 14:00\nדיון מחר 10:30\nפגישה עוד שעה\nפגישה עוד 2 שעות\nטיפול רכב 12/4 09:00"
         )
       );
     }
@@ -126,24 +141,22 @@ app.post("/whatsapp", async (req, res) => {
     if (reminderTime <= now) {
       res.set("Content-Type", "text/xml");
       return res.send(
-        createTwimlMessage("הזמן שנשלח קרוב מדי או כבר עבר. תשלח זמן רחוק יותר מ-5 דקות.")
+        createTwimlMessage("הזמן קרוב מדי או כבר עבר. תשלח זמן רחוק ביותר מ-5 דקות.")
       );
     }
 
-    const delay = reminderTime.getTime() - now.getTime();
+    const reminders = loadReminders();
 
-    setTimeout(async () => {
-      try {
-        await client.messages.create({
-          from: FROM_NUMBER,
-          to: from,
-          body: `תזכורת: ${eventText} בעוד 5 דקות`
-        });
-        console.log(`Reminder sent to ${from} for ${eventText}`);
-      } catch (err) {
-        console.error("Failed to send reminder:", err.message);
-      }
-    }, delay);
+    reminders.push({
+      id: Date.now().toString(),
+      to: from,
+      eventText,
+      eventTime: eventTime.toISOString(),
+      reminderTime: reminderTime.toISOString(),
+      sent: false
+    });
+
+    saveReminders(reminders);
 
     res.set("Content-Type", "text/xml");
     return res.send(
@@ -157,6 +170,42 @@ app.post("/whatsapp", async (req, res) => {
     return res.send(createTwimlMessage("הייתה שגיאה, נסה שוב."));
   }
 });
+
+setInterval(async () => {
+  try {
+    const reminders = loadReminders();
+    const now = new Date();
+    let changed = false;
+
+    for (const reminder of reminders) {
+      if (reminder.sent) continue;
+
+      const reminderTime = new Date(reminder.reminderTime);
+
+      if (now >= reminderTime) {
+        try {
+          await client.messages.create({
+            from: FROM_NUMBER,
+            to: reminder.to,
+            body: `תזכורת: ${reminder.eventText} בעוד 5 דקות`
+          });
+
+          reminder.sent = true;
+          changed = true;
+          console.log(`Reminder sent to ${reminder.to}`);
+        } catch (err) {
+          console.error("Failed to send reminder:", err.message);
+        }
+      }
+    }
+
+    if (changed) {
+      saveReminders(reminders);
+    }
+  } catch (err) {
+    console.error("Interval error:", err.message);
+  }
+}, 60 * 1000);
 
 app.listen(PORT, () => {
   console.log(`Bot running on port ${PORT}`);

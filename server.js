@@ -426,7 +426,73 @@ app.post("/whatsapp", async (req, res) => {
     }
 
     const user = getUserByPhone(from);
+    // ההתראות שלי
+    if (normalizeText(incoming) === "ההתראות שלי") {
+      const pendingReminders = getPendingRemindersForUser(from);
 
+      res.set("Content-Type", "text/xml");
+      return res.send(createTwimlMessage(buildRemindersListMessage(pendingReminders)));
+    }
+
+    // מחק הכל
+    if (normalizeText(incoming) === "מחק הכל") {
+      const reminders = loadReminders();
+      const now = new Date();
+
+      const beforeCount = reminders.length;
+
+      const filtered = reminders.filter((reminder) => {
+        const isMine = reminder.to === from && !reminder.sent && new Date(reminder.reminderTime) > now;
+        return !isMine;
+      });
+
+      const deletedCount = beforeCount - filtered.length;
+
+      saveReminders(filtered);
+
+      res.set("Content-Type", "text/xml");
+      return res.send(
+        createTwimlMessage(
+          deletedCount
+            ? `נמחקו ${deletedCount} התראות ✅`
+            : "לא היו לך התראות פעילות למחיקה."
+        )
+      );
+    }
+
+    // מחק התראה X
+    const deleteMatch = incoming.match(/^מחק התראה\s+(\d+)$/);
+    if (deleteMatch) {
+      const reminderNumber = parseInt(deleteMatch[1], 10);
+      const reminders = loadReminders();
+      const now = new Date();
+
+      const myPending = reminders
+        .filter((reminder) => reminder.to === from && !reminder.sent && new Date(reminder.reminderTime) > now)
+        .sort((a, b) => new Date(a.reminderTime) - new Date(b.reminderTime));
+
+      if (!myPending.length) {
+        res.set("Content-Type", "text/xml");
+        return res.send(createTwimlMessage("אין לך התראות פעילות כרגע."));
+      }
+
+      if (reminderNumber < 1 || reminderNumber > myPending.length) {
+        res.set("Content-Type", "text/xml");
+        return res.send(createTwimlMessage(`מספר התראה לא תקין. שלח "ההתראות שלי" כדי לראות את הרשימה.`));
+      }
+
+      const reminderToDelete = myPending[reminderNumber - 1];
+
+      const filtered = reminders.filter((reminder) => reminder.id !== reminderToDelete.id);
+      saveReminders(filtered);
+
+      res.set("Content-Type", "text/xml");
+      return res.send(
+        createTwimlMessage(
+          `נמחקה התראה ✅\n${formatDate(new Date(reminderToDelete.eventTime))} - ${reminderToDelete.eventText}`
+        )
+      );
+    }
     if (!user) {
       res.set("Content-Type", "text/xml");
       return res.send(

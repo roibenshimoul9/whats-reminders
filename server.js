@@ -13,9 +13,45 @@ const client = twilio(accountSid, authToken);
 
 const PORT = process.env.PORT || 3000;
 const FROM_NUMBER = "whatsapp:+14155238886";
-const FILE_PATH = path.join(__dirname, "reminders.json");
 
-const MY_KEYWORDS = ["רמדים", 'רמ"דים', "רמ״דים", "רועי"];
+const REMINDERS_FILE = path.join(__dirname, "reminders.json");
+const USERS_FILE = path.join(__dirname, "users.json");
+
+function ensureFile(filePath, defaultValue) {
+  if (!fs.existsSync(filePath)) {
+    fs.writeFileSync(filePath, JSON.stringify(defaultValue, null, 2), "utf8");
+  }
+}
+
+function readJson(filePath, defaultValue) {
+  try {
+    ensureFile(filePath, defaultValue);
+    return JSON.parse(fs.readFileSync(filePath, "utf8"));
+  } catch (err) {
+    console.error(`Failed reading ${filePath}:`, err.message);
+    return defaultValue;
+  }
+}
+
+function writeJson(filePath, data) {
+  fs.writeFileSync(filePath, JSON.stringify(data, null, 2), "utf8");
+}
+
+function loadUsers() {
+  return readJson(USERS_FILE, []);
+}
+
+function saveUsers(users) {
+  writeJson(USERS_FILE, users);
+}
+
+function loadReminders() {
+  return readJson(REMINDERS_FILE, []);
+}
+
+function saveReminders(reminders) {
+  writeJson(REMINDERS_FILE, reminders);
+}
 
 function pad(num) {
   return String(num).padStart(2, "0");
@@ -26,31 +62,84 @@ function formatDate(date) {
 }
 
 function createTwimlMessage(message) {
-  return `<?xml version="1.0" encoding="UTF-8"?><Response><Message>${message}</Message></Response>`;
+  const safe = String(message)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+  return `<?xml version="1.0" encoding="UTF-8"?><Response><Message>${safe}</Message></Response>`;
 }
 
-function loadReminders() {
-  try {
-    if (!fs.existsSync(FILE_PATH)) {
-      fs.writeFileSync(FILE_PATH, "[]");
-    }
-    return JSON.parse(fs.readFileSync(FILE_PATH, "utf8"));
-  } catch (err) {
-    console.error("Failed to load reminders:", err.message);
-    return [];
-  }
+function normalizeText(text) {
+  return String(text)
+    .replace(/״/g, '"')
+    .replace(/׳/g, "'")
+    .replace(/\s+/g, " ")
+    .trim()
+    .toLowerCase();
 }
 
-function saveReminders(reminders) {
-  fs.writeFileSync(FILE_PATH, JSON.stringify(reminders, null, 2), "utf8");
+function getUserByPhone(phone) {
+  const users = loadUsers();
+  return users.find((user) => user.phone === phone);
 }
 
-function lineBelongsToMe(line) {
-  const normalized = line.toLowerCase();
-  return MY_KEYWORDS.some((keyword) => normalized.includes(keyword.toLowerCase()));
+function parseRegistrationMessage(text) {
+  const lines = text
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean);
+
+  if (!lines.length) return null;
+  if (normalizeText(lines[0]) !== "הרשמה") return null;
+
+  const nameLine = lines.find((line) => line.startsWith("שם:"));
+  const keywordsLine = lines.find((line) => line.startsWith("מילים:"));
+
+  if (!nameLine || !keywordsLine) return { error: "missing_fields" };
+
+  const name = nameLine.replace("שם:", "").trim();
+  const keywords = keywordsLine
+    .replace("מילים:", "")
+    .split(",")
+    .map((k) => k.trim())
+    .filter(Boolean);
+
+  if (!name || !keywords.length) return { error: "invalid_fields" };
+
+  return { name, keywords };
 }
 
-function parseScheduleMessage(text) {
+function parseUpdateMessage(text) {
+  const lines = text
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean);
+
+  if (!lines.length) return null;
+  if (normalizeText(lines[0]) !== "עדכון") return null;
+
+  const keywordsLine = lines.find((line) => line.startsWith("מילים:"));
+  if (!keywordsLine) return { error: "missing_keywords" };
+
+  const keywords = keywordsLine
+    .replace("מילים:", "")
+    .split(",")
+    .map((k) => k.trim())
+    .filter(Boolean);
+
+  if (!keywords.length) return { error: "invalid_keywords" };
+
+  return { keywords };
+}
+
+function lineBelongsToUser(line, user) {
+  if (!user || !user.keywords || !user.keywords.length) return false;
+
+  const normalizedLine = normalizeText(line);
+  return user.keywords.some((keyword) => normalizedLine.includes(normalizeText(keyword)));
+}
+
+function parseScheduleMessage(text, user) {
   const lines = text
     .split("\n")
     .map((line) => line.trim())
@@ -58,14 +147,18 @@ function parseScheduleMessage(text) {
 
   if (lines.length < 2) return null;
 
-  const firstLine = lines[0];
+  const header = normalizeText(lines[0]);
+  const isTomorrow = header.includes("למחר");
+  const isSchedule = header.includes("לוז");
+
+  if (!isSchedule) return null;
+
   const now = new Date();
-
-  let baseDate = new Date(now);
+  const baseDate = new Date(now);
   baseDate.setSeconds(0, 0);
+  baseDate.setMilliseconds(0);
 
-  // אם כתוב "לוז למחר"
-  if (firstLine.includes("למחר")) {
+  if (isTomorrow) {
     baseDate.setDate(baseDate.getDate() + 1);
   }
 
@@ -74,8 +167,7 @@ function parseScheduleMessage(text) {
   for (const line of lines.slice(1)) {
     const match = line.match(/^(\d{1,2}):(\d{2})-(\d{1,2}):(\d{2})\s+(.+)$/);
     if (!match) continue;
-
-    if (!lineBelongsToMe(line)) continue;
+    if (!lineBelongsToUser(line, user)) continue;
 
     const startHour = parseInt(match[1], 10);
     const startMinute = parseInt(match[2], 10);
@@ -84,7 +176,7 @@ function parseScheduleMessage(text) {
     const eventTime = new Date(baseDate);
     eventTime.setHours(startHour, startMinute, 0, 0);
 
-    if (!firstLine.includes("למחר") && eventTime <= now) {
+    if (!isTomorrow && eventTime <= now) {
       eventTime.setDate(eventTime.getDate() + 1);
     }
 
@@ -98,7 +190,7 @@ function parseScheduleMessage(text) {
     });
   }
 
-  return relevantItems.length ? relevantItems : null;
+  return relevantItems.length ? relevantItems : [];
 }
 
 function parseSingleReminder(text) {
@@ -129,7 +221,6 @@ function parseSingleReminder(text) {
     const eventTime = new Date(now);
     eventTime.setDate(eventTime.getDate() + 1);
     eventTime.setHours(hour, minute, 0, 0);
-
     return { eventText, eventTime };
   }
 
@@ -171,6 +262,13 @@ function parseSingleReminder(text) {
   return null;
 }
 
+function buildProfileMessage(user) {
+  return `הפרופיל שלך ✅
+שם: ${user.name}
+מספר: ${user.phone}
+מילים: ${user.keywords.join(", ")}`;
+}
+
 app.get("/", (req, res) => {
   res.send("WhatsApp reminder bot is running");
 });
@@ -179,13 +277,107 @@ app.post("/whatsapp", async (req, res) => {
   try {
     const incoming = (req.body.Body || "").trim();
     const from = req.body.From;
-    const reminders = loadReminders();
 
-    // קודם בודקים אם זו הודעת לו"ז מרובת שורות
-    const scheduleItems = parseScheduleMessage(incoming);
+    if (!incoming) {
+      res.set("Content-Type", "text/xml");
+      return res.send(createTwimlMessage("לא התקבלה הודעה."));
+    }
 
-    if (scheduleItems) {
+    // הרשמה
+    const registration = parseRegistrationMessage(incoming);
+    if (registration) {
+      if (registration.error) {
+        res.set("Content-Type", "text/xml");
+        return res.send(
+          createTwimlMessage(
+            'פורמט הרשמה לא תקין.\nשלח כך:\nהרשמה\nשם: רועי\nמילים: רועי, רועי בן שימול, רמדים, רמ"דים'
+          )
+        );
+      }
+
+      const users = loadUsers();
+      const existingIndex = users.findIndex((user) => user.phone === from);
+
+      const newUser = {
+        phone: from,
+        name: registration.name,
+        keywords: registration.keywords
+      };
+
+      if (existingIndex >= 0) {
+        users[existingIndex] = newUser;
+      } else {
+        users.push(newUser);
+      }
+
+      saveUsers(users);
+
+      res.set("Content-Type", "text/xml");
+      return res.send(
+        createTwimlMessage(
+          `נרשמת בהצלחה ✅\nשם: ${newUser.name}\nמילים: ${newUser.keywords.join(", ")}`
+        )
+      );
+    }
+
+    // עדכון
+    const update = parseUpdateMessage(incoming);
+    if (update) {
+      if (update.error) {
+        res.set("Content-Type", "text/xml");
+        return res.send(
+          createTwimlMessage('פורמט עדכון לא תקין.\nשלח כך:\nעדכון\nמילים: רועי, רמדים, רמ"דים')
+        );
+      }
+
+      const users = loadUsers();
+      const index = users.findIndex((user) => user.phone === from);
+
+      if (index === -1) {
+        res.set("Content-Type", "text/xml");
+        return res.send(createTwimlMessage("אתה עדיין לא רשום. שלח קודם הודעת הרשמה."));
+      }
+
+      users[index].keywords = update.keywords;
+      saveUsers(users);
+
+      res.set("Content-Type", "text/xml");
+      return res.send(createTwimlMessage(`עודכן בהצלחה ✅\nמילים: ${update.keywords.join(", ")}`));
+    }
+
+    // פרופיל
+    if (normalizeText(incoming) === "הפרופיל שלי") {
+      const user = getUserByPhone(from);
+
+      res.set("Content-Type", "text/xml");
+      if (!user) {
+        return res.send(createTwimlMessage("אתה עדיין לא רשום. שלח קודם הודעת הרשמה."));
+      }
+
+      return res.send(createTwimlMessage(buildProfileMessage(user)));
+    }
+
+    const user = getUserByPhone(from);
+
+    if (!user) {
+      res.set("Content-Type", "text/xml");
+      return res.send(
+        createTwimlMessage(
+          'כדי להתחיל צריך להירשם.\nשלח כך:\nהרשמה\nשם: רועי\nמילים: רועי, רועי בן שימול, רמדים, רמ"דים'
+        )
+      );
+    }
+
+    // לו"ז
+    const scheduleItems = parseScheduleMessage(incoming, user);
+    if (scheduleItems !== null) {
+      if (!scheduleItems.length) {
+        res.set("Content-Type", "text/xml");
+        return res.send(createTwimlMessage("לא מצאתי בלו״ז שורות שמתאימות למילים שלך."));
+      }
+
       const now = new Date();
+      const reminders = loadReminders();
       const addedItems = [];
 
       for (const item of scheduleItems) {
@@ -194,6 +386,7 @@ app.post("/whatsapp", async (req, res) => {
         reminders.push({
           id: item.id,
           to: from,
+          userName: user.name,
           eventText: item.eventText,
           eventTime: item.eventTime.toISOString(),
           reminderTime: item.reminderTime.toISOString(),
@@ -216,18 +409,19 @@ app.post("/whatsapp", async (req, res) => {
 
       res.set("Content-Type", "text/xml");
       return res.send(
-        createTwimlMessage(`מצאתי ${addedItems.length} לוזים שלך ✅\n\n${summary}\n\nאזכיר לך 5 דקות לפני כל אחד.`)
+        createTwimlMessage(
+          `מצאתי ${addedItems.length} לוזים שלך ✅\n\n${summary}\n\nאזכיר לך 5 דקות לפני כל אחד.`
+        )
       );
     }
 
-    // אם זו לא הודעת לו"ז, מתייחסים לזה כתזכורת בודדת
+    // תזכורת בודדת
     const parsed = parseSingleReminder(incoming);
-
     if (!parsed) {
       res.set("Content-Type", "text/xml");
       return res.send(
         createTwimlMessage(
-          "לא הבנתי 😅\nאפשר לשלוח:\nדיון 14:00\nדיון מחר 10:30\nפגישה עוד שעה\nאו פשוט להדביק לו״ז מלא, ואני אקח רק שורות של רמדים / רמ״דים / רועי."
+          'לא הבנתי 😅\nאפשר לשלוח:\nדיון 14:00\nדיון מחר 10:30\nפגישה עוד שעה\nאו להדביק לו״ז מלא אחרי שנרשמת.'
         )
       );
     }
@@ -241,9 +435,11 @@ app.post("/whatsapp", async (req, res) => {
       return res.send(createTwimlMessage("הזמן קרוב מדי או כבר עבר. תשלח זמן רחוק ביותר מ-5 דקות."));
     }
 
+    const reminders = loadReminders();
     reminders.push({
       id: Date.now().toString(),
       to: from,
+      userName: user.name,
       eventText,
       eventTime: eventTime.toISOString(),
       reminderTime: reminderTime.toISOString(),
@@ -276,7 +472,7 @@ setInterval(async () => {
 
       const reminderTime = new Date(reminder.reminderTime);
 
-      if (now >= reminderTime) {
+      if (now >= reminderTime && now - reminderTime < 10 * 60 * 1000) {
         try {
           await client.messages.create({
             from: FROM_NUMBER,

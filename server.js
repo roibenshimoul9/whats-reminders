@@ -426,6 +426,35 @@ app.post("/whatsapp", async (req, res) => {
     }
 
     const user = getUserByPhone(from);
+
+    if (normalizeText(incoming) === "עזרה") {
+
+res.set("Content-Type", "text/xml");
+
+return res.send(
+createTwimlMessage(
+`פקודות הבוט 🤖
+
+הרשמה
+שם: השם שלך
+מילים: מילה1, מילה2
+
+עדכון
+מילים: מילה1, מילה2
+
+הפרופיל שלי
+ההתראות שלי
+מחק התראה 1
+מחק הכל
+
+דוגמאות:
+דיון 14:00
+דיון מחר 10:30
+פגישה 25/03 14:00`
+)
+);
+
+}
     // ההתראות שלי
     if (normalizeText(incoming) === "ההתראות שלי") {
       const pendingReminders = getPendingRemindersForUser(from);

@@ -15,6 +15,8 @@ const PORT = process.env.PORT || 3000;
 const FROM_NUMBER = "whatsapp:+14155238886";
 const FILE_PATH = path.join(__dirname, "reminders.json");
 
+const MY_KEYWORDS = ["רמדים", 'רמ"דים', "רמ״דים", "רועי"];
+
 function pad(num) {
   return String(num).padStart(2, "0");
 }
@@ -43,10 +45,65 @@ function saveReminders(reminders) {
   fs.writeFileSync(FILE_PATH, JSON.stringify(reminders, null, 2), "utf8");
 }
 
-function parseReminder(text) {
-  const input = text.trim();
+function lineBelongsToMe(line) {
+  const normalized = line.toLowerCase();
+  return MY_KEYWORDS.some((keyword) => normalized.includes(keyword.toLowerCase()));
+}
+
+function parseScheduleMessage(text) {
+  const lines = text
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean);
+
+  if (lines.length < 2) return null;
+
+  const firstLine = lines[0];
   const now = new Date();
 
+  let baseDate = new Date(now);
+  baseDate.setSeconds(0, 0);
+
+  // אם כתוב "לוז למחר"
+  if (firstLine.includes("למחר")) {
+    baseDate.setDate(baseDate.getDate() + 1);
+  }
+
+  const relevantItems = [];
+
+  for (const line of lines.slice(1)) {
+    const match = line.match(/^(\d{1,2}):(\d{2})-(\d{1,2}):(\d{2})\s+(.+)$/);
+    if (!match) continue;
+
+    if (!lineBelongsToMe(line)) continue;
+
+    const startHour = parseInt(match[1], 10);
+    const startMinute = parseInt(match[2], 10);
+    const title = match[5].trim();
+
+    const eventTime = new Date(baseDate);
+    eventTime.setHours(startHour, startMinute, 0, 0);
+
+    if (!firstLine.includes("למחר") && eventTime <= now) {
+      eventTime.setDate(eventTime.getDate() + 1);
+    }
+
+    const reminderTime = new Date(eventTime.getTime() - 5 * 60 * 1000);
+
+    relevantItems.push({
+      id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      eventText: title,
+      eventTime,
+      reminderTime
+    });
+  }
+
+  return relevantItems.length ? relevantItems : null;
+}
+
+function parseSingleReminder(text) {
+  const input = text.trim();
+  const now = new Date();
   let eventText = input;
 
   if (/עוד שעה/.test(input)) {
@@ -122,14 +179,55 @@ app.post("/whatsapp", async (req, res) => {
   try {
     const incoming = (req.body.Body || "").trim();
     const from = req.body.From;
+    const reminders = loadReminders();
 
-    const parsed = parseReminder(incoming);
+    // קודם בודקים אם זו הודעת לו"ז מרובת שורות
+    const scheduleItems = parseScheduleMessage(incoming);
+
+    if (scheduleItems) {
+      const now = new Date();
+      const addedItems = [];
+
+      for (const item of scheduleItems) {
+        if (item.reminderTime <= now) continue;
+
+        reminders.push({
+          id: item.id,
+          to: from,
+          eventText: item.eventText,
+          eventTime: item.eventTime.toISOString(),
+          reminderTime: item.reminderTime.toISOString(),
+          sent: false
+        });
+
+        addedItems.push(item);
+      }
+
+      saveReminders(reminders);
+
+      if (!addedItems.length) {
+        res.set("Content-Type", "text/xml");
+        return res.send(createTwimlMessage("מצאתי את הלוזים שלך, אבל כולם כבר עברו או קרובים מדי."));
+      }
+
+      const summary = addedItems
+        .map((item, index) => `${index + 1}. ${formatDate(item.eventTime)} - ${item.eventText}`)
+        .join("\n");
+
+      res.set("Content-Type", "text/xml");
+      return res.send(
+        createTwimlMessage(`מצאתי ${addedItems.length} לוזים שלך ✅\n\n${summary}\n\nאזכיר לך 5 דקות לפני כל אחד.`)
+      );
+    }
+
+    // אם זו לא הודעת לו"ז, מתייחסים לזה כתזכורת בודדת
+    const parsed = parseSingleReminder(incoming);
 
     if (!parsed) {
       res.set("Content-Type", "text/xml");
       return res.send(
         createTwimlMessage(
-          "לא הבנתי 😅\nשלח למשל:\nדיון 14:00\nדיון מחר 10:30\nפגישה עוד שעה\nפגישה עוד 2 שעות\nטיפול רכב 12/4 09:00"
+          "לא הבנתי 😅\nאפשר לשלוח:\nדיון 14:00\nדיון מחר 10:30\nפגישה עוד שעה\nאו פשוט להדביק לו״ז מלא, ואני אקח רק שורות של רמדים / רמ״דים / רועי."
         )
       );
     }
@@ -140,12 +238,8 @@ app.post("/whatsapp", async (req, res) => {
 
     if (reminderTime <= now) {
       res.set("Content-Type", "text/xml");
-      return res.send(
-        createTwimlMessage("הזמן קרוב מדי או כבר עבר. תשלח זמן רחוק ביותר מ-5 דקות.")
-      );
+      return res.send(createTwimlMessage("הזמן קרוב מדי או כבר עבר. תשלח זמן רחוק ביותר מ-5 דקות."));
     }
-
-    const reminders = loadReminders();
 
     reminders.push({
       id: Date.now().toString(),

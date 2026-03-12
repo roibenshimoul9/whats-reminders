@@ -315,6 +315,28 @@ function buildProfileMessage(user) {
 מילים: ${user.keywords.join(", ")}`;
 }
 
+function getPendingRemindersForUser(phone) {
+  const reminders = loadReminders();
+  const now = new Date();
+
+  return reminders
+    .filter((reminder) => reminder.to === phone && !reminder.sent && new Date(reminder.reminderTime) > now)
+    .sort((a, b) => new Date(a.reminderTime) - new Date(b.reminderTime));
+}
+
+function buildRemindersListMessage(reminders) {
+  if (!reminders.length) {
+    return "אין לך התראות פעילות כרגע.";
+  }
+
+  const lines = reminders.map((reminder, index) => {
+    const eventTime = new Date(reminder.eventTime);
+    const reminderTime = new Date(reminder.reminderTime);
+    return `${index + 1}. ${formatDate(eventTime)} - ${reminder.eventText}\n   תזכורת ב: ${formatDate(reminderTime)}`;
+  });
+
+  return `ההתראות שלך ✅\n\n${lines.join("\n\n")}`;
+}
 app.get("/", (req, res) => {
   res.send("WhatsApp reminder bot is running");
 });
